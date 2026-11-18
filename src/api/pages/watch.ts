@@ -148,6 +148,9 @@ interface WatchPageData {
   seriesUrl:    string;
   seriesPoster: string;
   censored:     "censored" | "uncensored" | "unknown";
+  /** Always true: the source burns subtitles into the picture, never a track. */
+  hardsub:      boolean;
+  subtitles:    never[];
   genres:       { name: string; url: string }[];
   synopsis:     string;
 
@@ -413,6 +416,12 @@ async function handleWatch(c: any) {
       seriesUrl:    page.seriesUrl,
       seriesPoster: page.seriesPoster,
       censored:     page.censored,
+    /**
+     * Subtitles are burned into the picture: the player page carries no .vtt or
+     * .srt and no caption track of any kind. Consumers should not look for one.
+     */
+    hardsub:      true,
+    subtitles:    [],
       genres:       page.genres,
       synopsis:     page.synopsis,
       prevEpisode:  page.prevEpisode,
