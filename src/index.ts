@@ -15,13 +15,73 @@ import watch from "./api/pages/watch";
 import download from "./api/pages/download";
 import extra from "./api/pages/extra";
 import { scrapeGenreList } from "./lib/scraper";
+import match from "./api/pages/match";
+import { authorize, configuredApiKey } from "./lib/auth";
+import { checkRateLimit } from "./lib/rate-limit";
 
 const app = new Hono().basePath("/api");
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
-app.use("*", cors());
+/**
+ * CORS: only the sites that are meant to call this. `ALLOWED_ORIGINS` is a
+ * comma list; the default is the public pair, so a forgotten variable cannot
+ * quietly open the service to every origin on the web.
+ */
+const DEFAULT_ORIGINS = ["https://kumoritv.top", "https://www.kumoritv.top"];
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const origins = allowedOrigins.length > 0 ? allowedOrigins : DEFAULT_ORIGINS;
+
+app.use("*", cors({
+  origin: (origin) => (origins.includes(origin) ? origin : origins[0]),
+  allowMethods: ["GET", "OPTIONS"],
+  allowHeaders: ["x-api-key", "authorization", "content-type"],
+  maxAge: 86400,
+}));
 app.use("*", logger());
 app.use("*", prettyJSON());
+
+/**
+ * Key gate. `/health` stays open so a platform healthcheck can distinguish
+ * "running but unconfigured" from "down".
+ */
+app.use("*", async (c, next) => {
+  if (c.req.method === "OPTIONS") return next();
+  const outcome = authorize(c.req.raw);
+  if (outcome === "ok") return next();
+  if (outcome === "unconfigured") {
+    return c.json({
+      success: false,
+      error: "AUTH_NOT_CONFIGURED",
+      message: "API_KEY is not set on this service. Set it before calling any route except /api/health.",
+    }, 503);
+  }
+  return c.json({
+    success: false,
+    error: "UNAUTHORIZED",
+    message: "Send the key as x-api-key, Authorization: Bearer <key>, or ?apiKey=",
+  }, 401);
+});
+
+/** Politeness limit per caller per route. One instance, one budget. */
+app.use("*", async (c, next) => {
+  const pathname = new URL(c.req.url).pathname;
+  if (pathname.replace(/\/+$/, "").endsWith("/health")) return next();
+  const limit = Number(process.env.RATE_LIMIT_PER_MIN || 120);
+  const ip =
+    (c.req.header("x-forwarded-for") || "").split(",")[0].trim() ||
+    c.req.header("cf-connecting-ip") ||
+    "local";
+  const result = checkRateLimit(`${ip}:${pathname}`, Number.isFinite(limit) ? limit : 120, 60_000);
+  c.header("x-ratelimit-remaining", String(result.remaining));
+  if (!result.allowed) {
+    c.header("retry-after", String(result.retryAfterSeconds));
+    return c.json({ success: false, error: "RATE_LIMITED", retryAfterSeconds: result.retryAfterSeconds }, 429);
+  }
+  return next();
+});
 
 // ─── Pages ────────────────────────────────────────────────────────────────────
 app.route("/home", home);
@@ -55,6 +115,10 @@ app.route("/release", release);
 // GET /api/search?q=keyword&page=2
 // GET /api/search/:page?q=keyword
 app.route("/search", search);
+
+// ─── Title match (for mapping an anime to a source page) ─────────────────────
+// GET /api/match?title=overflow&limit=8
+app.route("/match", match);
 
 // ─── Calendar ─────────────────────────────────────────────────────────────────
 // GET /api/calendar
@@ -99,7 +163,13 @@ app.route("/extra", extra);
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/health", (c) =>
-  c.json({ success: true, status: "ok", timestamp: new Date().toISOString() })
+  c.json({
+    success: true,
+    status: "ok",
+    auth: configuredApiKey() ? "api-key" : "unconfigured",
+    rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MIN || 120),
+    timestamp: new Date().toISOString(),
+  })
 );
 
 // ─── 404 ──────────────────────────────────────────────────────────────────────
@@ -139,6 +209,7 @@ app.notFound((c) =>
         "GET /api/download/:slug",
         "GET /api/extra",
         "GET /api/search?q=:query&page=1",
+        "GET /api/match?title=:title&limit=8",
         "GET /api/health",
       ],
     },
