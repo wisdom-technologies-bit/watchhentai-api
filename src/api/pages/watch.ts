@@ -7,6 +7,7 @@ import {
   type VideoSource,
 } from "../../lib/scraper";
 import { cleanText, normalizeThumbnail, resolveUrl } from "../../lib/format";
+import { detectVariant } from "../../lib/variant";
 
 const watch = new Hono();
 
@@ -251,8 +252,6 @@ function parseWatchPage(html: string, slug: string): ParsedWatchPage {
     html.match(/<div id="info"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/)?.[1] ??
     html.slice(0, 14000);
   let censored: WatchPageData["censored"] = "unknown";
-  if (/<div class="buttoncensured">/i.test(infoHtml))    censored = "censored";
-  else if (/<div class="buttonuncensured">/i.test(infoHtml)) censored = "uncensored";
 
   // ── Genres — from .sgeneros ────────────────────────────────────────────────
   const genres: WatchPageData["genres"] = [];
@@ -266,6 +265,14 @@ function parseWatchPage(html: string, slug: string): ParsedWatchPage {
   }
 
   // ── Synopsis ───────────────────────────────────────────────────────────────
+  // Genres are authoritative here; the badge div is often not rendered any more.
+  censored = detectVariant({
+    genres,
+    title: decodeEntities((infoHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? "").replace(/<[^>]+>/g, " ")),
+    slug,
+    html: infoHtml,
+  });
+
   const synopsis = stripHtml(
     html.match(/<div class="synopsis">\s*<p>([\s\S]*?)<\/p>/i)?.[1] ?? ""
   );

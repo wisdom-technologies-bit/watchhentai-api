@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { detectVariant } from "../../lib/variant";
 import { fetchPage } from "../../lib/scraper";
 import { cleanText, resolveUrl } from "../../lib/format";
 
@@ -97,9 +98,10 @@ function parseSeriesListHtml(html: string, page: number) {
     );
     const year = yearMatch ? yearMatch[1] : "";
 
-    let censored: SeriesListItem["censored"] = "unknown";
-    if (/<div class="buttoncensured">/i.test(art)) censored = "censored";
-    else if (/<div class="buttonuncensured">/i.test(art)) censored = "uncensored";
+    let censored: SeriesListItem["censored"] = detectVariant({
+      title: title,
+      html: art,
+    });
 
     if (title) items.push({ id, title, url, poster, year, censored });
   }
@@ -210,8 +212,6 @@ function parseSeriesDetailHtml(html: string, slug: string): SeriesDetail {
   );
   const sheaderHtml = sheaderMatch ? sheaderMatch[1] : html.slice(0, 8000);
   let censored: SeriesDetail["censored"] = "unknown";
-  if (/<div class="buttoncensured">/i.test(sheaderHtml)) censored = "censored";
-  else if (/<div class="buttonuncensured">/i.test(sheaderHtml)) censored = "uncensored";
 
   // ── date created ─────────────────────────────────────────────────────────────
   const dateMatch = html.match(/itemprop="dateCreated">([^<]+)<\/span>/i);
@@ -353,6 +353,9 @@ function parseSeriesDetailHtml(html: string, slug: string): SeriesDetail {
       }
     }
   }
+
+  // Genres are authoritative here; the badge div is often not rendered any more.
+  censored = detectVariant({ genres, title, slug, html: sheaderHtml });
 
   return {
     id,

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { scrapeSearch } from "../../lib/scraper";
+import { detectVariant } from "../../lib/variant";
 
 /**
  * Title to candidates, for the mapping step.
@@ -58,7 +59,7 @@ export function scoreTitle(candidate: string, query: string): number {
  * `unknown`, never a guess at "censored".
  */
 export function variantHint(value: string): Variant {
-  return /\buncensored\b/i.test(value) ? "uncensored" : "unknown";
+  return detectVariant({ title: value });
 }
 
 function slugOf(url: string): string {
