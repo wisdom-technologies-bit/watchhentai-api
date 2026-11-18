@@ -107,6 +107,12 @@ interface VideoPlayer {
   src:     string;
   /** All quality sources scraped from the player page */
   sources: VideoSource[];
+  /**
+   * hstorage.xyz answers 403 unless the request carries this referer, so any
+   * player that does not send it (a browser on another origin, a proxy) must be
+   * told. It is the source site, not a secret.
+   */
+  referer: string;
   /** Video container type: "mp4", "m3u8", … */
   type:     string;
   /** ISO 8601 duration e.g. "PT24M50S" — from player page schema */
@@ -193,7 +199,9 @@ function parseWatchPage(html: string, slug: string): ParsedWatchPage {
 
   // ── Title ──────────────────────────────────────────────────────────────────
   const rawTitle = decodeEntities(
-    (html.match(/<h1>([^<]+)<\/h1>/i)?.[1] ?? "")
+    (html.match(/<h1[^>]*class=['"]module-title['"][^>]*>([\s\S]*?)<\/h1>/i)?.[1] ??
+      html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ??
+      "").replace(/<[^>]+>/g, " ")
   ).replace(/\s*-\s*Watch Hentai\s*$/i, "").trim();
 
   // Split "Series Name – Episode N"
@@ -370,11 +378,13 @@ async function handleWatch(c: any) {
     }
 
     // ── 3. Build final response ───────────────────────────────────────────────
+    const referer = "https://watchhentai.net/";
     const player: VideoPlayer = {
       originalSrc:  page.playerUrl,
       alternateSrc: page.alternateSrc,
       src:          playerData.defaultSrc,
-      sources:      playerData.sources,
+      referer,
+      sources:      playerData.sources.map((source) => ({ ...source, referer })),
       type:         page.videoType,
       duration:     playerData.duration,
       thumbnail:    playerData.thumbnail || page.thumbnail,

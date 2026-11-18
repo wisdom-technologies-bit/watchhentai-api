@@ -348,38 +348,51 @@ export function parseSlider(doc: HtmlDoc): SliderItem[] {
 }
 
 export function parseEpisodes(doc: HtmlDoc): EpisodeItem[] {
-  const re = /class="animation-2 items full">([\s\S]*?)<header/i;
-  const m = doc.html.match(re);
-  if (!m) return [];
-  const section = new HtmlDoc(m[1]);
-  return section.articles().map((art) => {
-    const id = art.attr("article", "id").replace("post-", "");
-    const href = art.attr("a", "href");
-    const seriesEl = art.tagText("span");
-    const episodeEl = art.tagText("h3");
-    const imgSrc = art.attr("img", "data-src");
-    const subMatch = art.html.match(/>(SUB|DUB)<\/span>/i);
-    const subType = subMatch ? subMatch[1].toUpperCase() : "SUB";
-    const censored = art.html.includes("buttoncensured");
-    const viewMatch = art.html.match(/fa-eye[^>]*>.*?([\d.,]+[km]?)\s*</i);
-    const views = viewMatch ? parseViewCount(viewMatch[1]) : 0;
-    const timeMatch = art.html.match(/fa-clock[^>]*>.*?<\/i>\s*([^<]+)</i);
-    const uploadedAtRaw = timeMatch ? cleanText(timeMatch[1]) : "";
-    const uploadedAt = parseRelativeTime(uploadedAtRaw);
-    return {
-      id,
-      title: `${cleanText(seriesEl)} - ${cleanText(episodeEl)}`,
-      series: cleanText(seriesEl),
-      episode: cleanText(episodeEl),
+  // Current markup: every recent episode is an <a class="ep-bd-link"> whose title
+  // carries "Series – Episode N", sitting over a thumbnail and a SUB/DUB badge.
+  // The old `animation-2 items full` list this parser read is gone.
+  const html = doc.html;
+  const out: EpisodeItem[] = [];
+  const linkRe = /<a class="ep-bd-link" href="([^"]+)" title="([^"]*)"><\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = linkRe.exec(html)) !== null) {
+    const href = m[1];
+    const fullTitle = cleanText(decodeBasicEntities(m[2]));
+    if (!fullTitle) continue;
+    const windowHtml = html.slice(Math.max(0, m.index - 1500), m.index);
+    const thumb =
+      windowHtml.match(/<img[^>]+class="ep-bd-base"[^>]+src="([^"]+)"/i)?.[1] ??
+      windowHtml.match(/<img[^>]+src="([^"]+\/uploads\/[^"]+)"/i)?.[1] ??
+      "";
+    const badge = windowHtml.match(/<span[^>]*>\s*(SUB|DUB)\s*<\/span>/i)?.[1]?.toUpperCase();
+    const parts = fullTitle.split(/\s*[–-]\s*/);
+    const episode = parts.length > 1 ? parts.slice(1).join(" - ").trim() : "";
+    out.push({
+      id: href.match(/postid-(\d+)/)?.[1] ?? "",
+      title: fullTitle,
+      series: (parts[0] ?? fullTitle).trim(),
+      episode,
       url: resolveUrl(href),
-      thumbnail: normalizeThumbnail(imgSrc),
-      subType,
-      censored,
-      views,
-      uploadedAt,
-      uploadedAtRaw,
-    };
-  });
+      thumbnail: normalizeThumbnail(thumb),
+      subType: badge ?? (/\bdub\b/i.test(fullTitle) ? "DUB" : "SUB"),
+      censored: /uncensored/i.test(fullTitle + href) ? false : true,
+      views: 0,
+      uploadedAt: "",
+      uploadedAtRaw: "",
+    });
+  }
+  return out;
+}
+
+/** The few entities the listing markup actually uses. */
+function decodeBasicEntities(value: string): string {
+  return value
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 export function parseSeriesSection(
@@ -453,6 +466,40 @@ function cleanUrl(raw: string): string {
   }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Media URL decoding
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The player page no longer ships a readable `?source=` URL. Sources arrive in
+ * `var whJwSources = [...]` with each `file` obfuscated by this exact routine
+ * (copied from the page, so it stays faithful):
+ *
+ *   s = s.replace(/-/g,"+").replace(/_/g,"/"); pad to %4; atob
+ *   xor each byte with (13 + i % 17); reverse; atob
+ *
+ * A value that is already an http(s) URL is returned untouched, so this is safe
+ * to call on every source.
+ */
+export function decodeMediaUrl(encoded: string): string {
+  if (!encoded || /^https?:\/\//i.test(encoded)) return encoded;
+  try {
+    const normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const raw = Buffer.from(padded, "base64");
+    let xored = "";
+    for (let i = 0; i < raw.length; i++) {
+      xored += String.fromCharCode(raw[i] ^ ((13 + (i % 17)) & 255));
+    }
+    const reversed = xored.split("").reverse().join("");
+    const decoded = Buffer.from(reversed, "base64").toString("utf8");
+    return /^https?:\/\//i.test(decoded) ? decoded : encoded;
+  } catch {
+    return encoded;
+  }
+}
+
 export async function scrapePlayerPage(
   playerUrl: string
 ): Promise<PlayerPageData> {
@@ -490,8 +537,27 @@ export async function scrapePlayerPage(
     }
   }
 
+  // The current player page declares its sources up front as `whJwSources`;
+  // `sources: [...]` inside the jwplayer setup is only a reference to it.
   const sources: VideoSource[] = [];
-  const sourcesBlockM = html.match(/sources\s*:\s*\[([\s\S]*?)\]/);
+  const whSourcesM = html.match(/var\s+whJwSources\s*=\s*(\[[\s\S]*?\]);/);
+  if (whSourcesM) {
+    try {
+      const parsed = JSON.parse(whSourcesM[1].replace(/\\\//g, "/")) as Array<{
+        file?: string; type?: string; label?: string;
+      }>;
+      for (const entry of parsed) {
+        if (!entry?.file) continue;
+        sources.push({
+          src:   decodeMediaUrl(entry.file),
+          type:  entry.type ?? "video/mp4",
+          label: entry.label ?? "default",
+        });
+      }
+    } catch (_) { /* fall through to the legacy block below */ }
+  }
+
+  const sourcesBlockM = sources.length === 0 ? html.match(/sources\s*:\s*\[([\s\S]*?)\]/) : null;
   if (sourcesBlockM) {
     const entryRe = /\{([\s\S]*?)\}/g;
     let em: RegExpExecArray | null;
@@ -502,7 +568,7 @@ export async function scrapePlayerPage(
       const labelM = entry.match(/["']?label["']?\s*:\s*["']([^"']+)["']/);
       if (fileM) {
         sources.push({
-          src:   cleanUrl(fileM[1].replace(/\\\//g, "/")),
+          src:   decodeMediaUrl(cleanUrl(fileM[1].replace(/\\\//g, "/"))),
           type:  typeM  ? typeM[1]  : "video/mp4",
           label: labelM ? labelM[1] : "default",
         });

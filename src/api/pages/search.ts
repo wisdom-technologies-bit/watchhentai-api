@@ -26,44 +26,39 @@ interface SearchPagination {
 // ─── parser ───────────────────────────────────────────────────────────────────
 
 function parseSearchHtml(html: string, query: string, page: number) {
-  // Scope to the search-page content block to avoid sidebar pollution
-  const contentMatch = html.match(
-    /<div class="search-page">([\s\S]*?)<\/div>\s*<div class="sidebar/
-  );
-  const contentHtml = contentMatch ? contentMatch[1] : html;
+  // Current markup: each hit is a card with <div class="poster"> … <div class="data">
+  // holding an <h3><a href title>, a data-src poster and a <span class="year">.
+  // The `.search-page` / `.result-item` shape this parser expected is gone.
+  const results: SearchResult[] = [];
+  const seen = new Set<string>();
 
-  // Extract each result-item
-  const itemRegex =
-    /<div class="result-item">[\s\S]*?<\/article>\s*<\/div>/gi;
-  const items = contentHtml.match(itemRegex) ?? [];
+  // Each hit is an <h3><a href title>, with the poster just above it in the same
+  // card and the year just below. Anchoring on the heading is what survives a
+  // theme change, because the wrapper class names do not.
+  const linkRe = /<h3>\s*<a href="([^"]+)"([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = linkRe.exec(html)) !== null) {
+    const url = resolveUrl(m[1]);
+    const title = cleanText(m[3].replace(/<[^>]+>/g, " ")) || cleanText(m[2].match(/title="([^"]*)"/)?.[1] ?? "");
+    if (!url || !title || seen.has(url)) continue;
 
-  const results: SearchResult[] = items.map((item) => {
-    // URL and title from the .title anchor
-    const titleMatch = item.match(
-      /<div class="title">\s*<a href="([^"]+)">([^<]+)<\/a>/i
+    const before = html.slice(Math.max(0, m.index - 1400), m.index);
+    const after = html.slice(m.index, m.index + 700);
+    const poster =
+      before.match(/data-src="([^"]+\/uploads\/[^"]+)"/i)?.[1] ??
+      before.match(/src="([^"]+\/uploads\/[^"]+)"/i)?.[1] ??
+      "";
+    const year = after.match(/class="year"[^>]*>\s*(\d{4})/i)?.[1] ?? "";
+    const description = cleanText(
+      (after.match(/<div class="contenido">([\s\S]*?)<\/div>/i)?.[1] ?? "").replace(/<[^>]+>/g, " ")
     );
-    const url = titleMatch ? resolveUrl(titleMatch[1]) : "";
-    const title = titleMatch ? cleanText(titleMatch[2]) : "";
 
-    // Poster — data-src on the lazy-loaded img
-    const posterMatch = item.match(/data-src="([^"]+\/uploads\/[^"]+)"/i);
-    const poster = posterMatch ? posterMatch[1] : "";
+    seen.add(url);
+    results.push({ title, url, poster, year, description });
+  }
 
-    // Year from <span class="year">
-    const yearMatch = item.match(/<span class="year">(\d{4})<\/span>/i);
-    const year = yearMatch ? yearMatch[1] : "";
-
-    // Description snippet from .contenido <p>
-    const descMatch = item.match(/<div class="contenido">\s*<p>([\s\S]*?)<\/p>/i);
-    const description = descMatch
-      ? cleanText(descMatch[1].replace(/\.\.\.$/, "").trim() + "...")
-      : "";
-
-    return { title, url, poster, year, description };
-  });
-
-  // Pagination — "Page X of Y" in .pagination <span>
-  const pagMatch = contentHtml.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
+  // Pagination — "Page X of Y" wherever the theme renders it.
+  const pagMatch = html.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
   const currentPage = pagMatch ? parseInt(pagMatch[1], 10) : page;
   const totalPages = pagMatch ? parseInt(pagMatch[2], 10) : 1;
 
